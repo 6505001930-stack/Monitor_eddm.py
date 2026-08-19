@@ -19,25 +19,15 @@ jobs:
 
       - name: Debug DWD directory listing (temporary)
         run: |
-          echo "--- status codes ---"
-          for u in \
-            "https://opendata.dwd.de/" \
-            "https://opendata.dwd.de/climate_environment/" \
-            "https://opendata.dwd.de/climate_environment/CDC/" \
-            "https://opendata.dwd.de/climate_environment/CDC/observations_germany/" \
-            "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/" \
-            "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/" \
-            "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/" \
-            "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/" \
-            ; do
-            code=$(curl -s -o /dev/null -w "%{http_code}" "$u")
-            echo "$code  $u"
-          done
-          echo "--- first 2000 chars of 10_minutes/air_temperature/ ---"
-          curl -sL "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/" | head -c 2000
+          echo "--- .txt files in now/ ---"
+          curl -sL "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/" | grep -o 'href="[^"]*\.txt"' || echo "none"
+          echo "--- total zip count in now/ ---"
+          curl -sL "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/" | grep -c '\.zip"'
+          echo "--- meta_data/ listing (first 3000 chars) ---"
+          curl -sL "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/meta_data/" | head -c 3000
           echo
-          echo "--- first 3000 chars of .../now/ ---"
-          curl -sL "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/" | head -c 3000
+          echo "--- recent/ .txt files ---"
+          curl -sL "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/recent/" | grep -o 'href="[^"]*\.txt"' || echo "none"
 
       - name: Run Munich Airport (EDDM) weather monitor
         run: python3 Monitor_eddm.py
