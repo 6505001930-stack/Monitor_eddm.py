@@ -1,0 +1,23 @@
+name: Debug DWD Freshness
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect DWD station 01262 file
+        run: |
+          BASE="https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now"
+          echo "=== now UTC ==="
+          date -u
+          echo "=== directory entry for station 01262 ==="
+          curl -sL "$BASE/" | grep -o '10minutenwerte_TU_01262_now.zip[^<]*' | head -2
+          echo "=== HTTP headers for the zip ==="
+          curl -sI "$BASE/10minutenwerte_TU_01262_now.zip" | grep -i -E 'last-modified|content-length|etag'
+          echo "=== full contents of the product file ==="
+          curl -sL -o /tmp/s.zip "$BASE/10minutenwerte_TU_01262_now.zip"
+          unzip -o -q /tmp/s.zip -d /tmp/sx
+          ls -la /tmp/sx
+          cat /tmp/sx/produkt_zehn_now_tu_*.txt
