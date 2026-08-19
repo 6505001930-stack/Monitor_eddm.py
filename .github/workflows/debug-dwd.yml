@@ -1,0 +1,46 @@
+name: Debug DWD Freshness
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tomorrow's per-model forecast (Munich)
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request
+          from datetime import datetime, timezone, timedelta
+
+          MODELS = ["icon_seamless", "gfs_seamless", "ecmwf_ifs025", "ukmo_seamless"]
+          url = (
+              "https://api.open-meteo.com/v1/forecast?latitude=48.3538&longitude=11.7861"
+              "&hourly=temperature_2m&models=" + ",".join(MODELS) + "&timezone=UTC&forecast_days=2"
+          )
+          with urllib.request.urlopen(url, timeout=15) as r:
+              data = json.load(r)
+
+          hourly = data["hourly"]
+          times = hourly["time"]
+          tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
+
+          print(f"Tomorrow (UTC date) = {tomorrow}")
+          print()
+          for model in MODELS:
+              series = hourly.get(f"temperature_2m_{model}")
+              if not series:
+                  print(f"{model}: no data")
+                  continue
+              pairs = [(t, v) for t, v in zip(times, series) if t.startswith(tomorrow) and v is not None]
+              if not pairs:
+                  print(f"{model}: no rows for tomorrow")
+                  continue
+              vals = [v for _, v in pairs]
+              hi_t, hi_v = max(pairs, key=lambda p: p[1])
+              lo_t, lo_v = min(pairs, key=lambda p: p[1])
+              print(f"{model:<16} min {lo_v:>5} @ {lo_t}   max {hi_v:>5} @ {hi_t}   ({len(pairs)}h of data)")
+              # full hourly curve, every 3h for a compact readout
+              row = "  ".join(f"{t[11:16]}={v}" for t, v in pairs[::3])
+              print(f"  every 3h: {row}")
+          PY
