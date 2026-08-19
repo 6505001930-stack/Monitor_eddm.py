@@ -16,6 +16,8 @@ four forecast models via Open-Meteo.
 import argparse
 import csv
 import io
+import os
+import statistics
 import sys
 import time
 import zipfile
@@ -107,7 +109,8 @@ def find_munich_station_id() -> int:
     return DWD_FALLBACK_STATION_ID
 
 
-def fetch_dwd_temperature():
+def fetch_dwd_rows():
+    """Return (station_id, every valid 10-minute row in today's file)."""
     station_id = find_munich_station_id()
     url = DWD_ZIP_URL_TEMPLATE.format(station_id=station_id)
     with urlopen(url, timeout=REQUEST_TIMEOUT) as response:
@@ -126,7 +129,7 @@ def fetch_dwd_temperature():
     rows = [row for row in rows if row.get("TT_10", DWD_MISSING_VALUE) != DWD_MISSING_VALUE]
     if not rows:
         raise ValueError("no valid TT_10 readings in DWD response")
-    return station_id, rows[-1]
+    return station_id, rows
 
 
 def format_dwd(station_id: int, row: dict) -> str:
@@ -139,6 +142,116 @@ def format_dwd(station_id: int, row: dict) -> str:
         f"  Humidity : {row.get('RF_10', 'N/A')} %",
         f"  Pressure : {row.get('PP_10', 'N/A')} hPa",
     ]
+    return "\n".join(lines)
+
+
+def fetch_metar_history(hours: int = 6):
+    url = f"{METAR_URL}&hours={hours}"
+    return fetch_json(url) or []
+
+
+def build_pairs(metar_entries, dwd_rows):
+    """Pair METAR and DWD readings that share the exact same observation time.
+
+    METAR is issued at :20 and :50, and DWD's 10-minute series has rows at
+    those same minutes, so an exact timestamp match gives a like-for-like
+    comparison. Comparing each source's newest value instead would compare
+    readings taken up to half an hour apart.
+    """
+    dwd_by_time = {}
+    for row in dwd_rows:
+        moment = parse_utc(row.get("MESS_DATUM"))
+        raw = row.get("TT_10")
+        if moment is None or raw in (None, "", DWD_MISSING_VALUE):
+            continue
+        try:
+            dwd_by_time[moment] = float(raw)
+        except ValueError:
+            continue
+
+    pairs = {}
+    for entry in metar_entries:
+        moment = parse_utc(entry.get("obsTime") or entry.get("reportTime"))
+        temp = entry.get("temp")
+        if moment is None or temp is None or moment not in dwd_by_time:
+            continue
+        try:
+            metar_temp = float(temp)
+        except (TypeError, ValueError):
+            continue
+        dwd_temp = dwd_by_time[moment]
+        pairs[moment] = (metar_temp, dwd_temp, round(metar_temp - dwd_temp, 2))
+    return pairs
+
+
+def update_pair_log(path: str, pairs: dict):
+    """Merge new pairs into the CSV, keyed by observation time.
+
+    DWD publishes 40-50 minutes late, so the DWD row matching a given METAR
+    often only appears on a later run. Keying by timestamp lets those gaps
+    fill themselves in without creating duplicates.
+    """
+    fields = ["obs_time_utc", "metar_temp_c", "dwd_tt10_c", "diff_c"]
+    existing = {}
+    if os.path.exists(path):
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if row.get("obs_time_utc"):
+                    existing[row["obs_time_utc"]] = row
+
+    added = 0
+    for moment, (metar_temp, dwd_temp, diff) in pairs.items():
+        key = moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+        if key not in existing:
+            added += 1
+        existing[key] = {
+            "obs_time_utc": key,
+            "metar_temp_c": metar_temp,
+            "dwd_tt10_c": dwd_temp,
+            "diff_c": diff,
+        }
+
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for key in sorted(existing):
+            writer.writerow(existing[key])
+
+    return added, existing
+
+
+def format_pair_summary(path: str, added: int, existing: dict) -> str:
+    diffs = []
+    for row in existing.values():
+        try:
+            diffs.append(float(row["diff_c"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    lines = [
+        "METAR vs DWD same-time comparison",
+        f"  Log      : {path} ({len(diffs)} pairs, {added} new this run)",
+    ]
+    if not diffs:
+        lines.append("  No overlapping timestamps yet — DWD lags, so pairs fill in later.")
+        return "\n".join(lines)
+
+    mean = statistics.fmean(diffs)
+    agree = sum(1 for d in diffs if abs(d) <= 0.5)
+    lines.append(f"  Mean diff: {mean:+.2f} C (METAR minus DWD)")
+    if len(diffs) > 1:
+        lines.append(f"  Spread   : sd {statistics.stdev(diffs):.2f} C, "
+                     f"range {min(diffs):+.1f} to {max(diffs):+.1f} C")
+    lines.append(f"  Within METAR's +/-0.5 C rounding: {agree}/{len(diffs)}")
+    if len(diffs) < 20:
+        lines.append("  Too few pairs to conclude anything yet.")
+    elif abs(mean) < 0.3:
+        lines.append("  Mean near zero — consistent with one sensor (or co-located sensors).")
+    else:
+        lines.append("  Persistent offset — points to separate sensors, not just sampling noise.")
     return "\n".join(lines)
 
 
@@ -246,24 +359,31 @@ def headline(metar_entry, dwd) -> str:
     return "CURRENT TEMPERATURE : unavailable (no measurement source reachable)"
 
 
-def get_report() -> str:
+def get_report(pair_log: str | None = None) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     metar_entry = None
+    metar_history = []
     metar_error = None
     try:
-        metar_data = fetch_json(METAR_URL)
-        if metar_data:
-            metar_entry = metar_data[0]
+        metar_history = fetch_metar_history()
+        if metar_history:
+            metar_entry = max(
+                metar_history,
+                key=lambda e: parse_utc(e.get("obsTime") or e.get("reportTime"))
+                or datetime.min.replace(tzinfo=timezone.utc),
+            )
         else:
             metar_error = "no data available"
     except (URLError, ValueError, TimeoutError, OSError) as exc:
         metar_error = f"failed to fetch ({exc})"
 
     dwd = None
+    dwd_rows = []
     dwd_error = None
     try:
-        dwd = fetch_dwd_temperature()
+        station_id, dwd_rows = fetch_dwd_rows()
+        dwd = (station_id, dwd_rows[-1])
     except (URLError, ValueError, TimeoutError, OSError, zipfile.BadZipFile, StopIteration) as exc:
         dwd_error = f"failed to fetch ({exc})"
 
@@ -305,6 +425,15 @@ def get_report() -> str:
     except (URLError, ValueError, TimeoutError, OSError) as exc:
         parts.append(f"Open-Meteo models: failed to fetch ({exc})")
 
+    if pair_log:
+        parts.append("")
+        try:
+            pairs = build_pairs(metar_history, dwd_rows)
+            added, existing = update_pair_log(pair_log, pairs)
+            parts.append(format_pair_summary(pair_log, added, existing))
+        except OSError as exc:
+            parts.append(f"METAR vs DWD log: failed ({exc})")
+
     return "\n".join(parts)
 
 
@@ -318,15 +447,21 @@ def main():
         default=0,
         help="Polling interval in seconds. If omitted, runs once and exits.",
     )
+    parser.add_argument(
+        "--pair-log",
+        metavar="CSV",
+        help="Append same-time METAR/DWD temperature pairs to this CSV and "
+             "report the running bias between the two sources.",
+    )
     args = parser.parse_args()
 
     if args.interval <= 0:
-        print(get_report())
+        print(get_report(args.pair_log))
         return
 
     try:
         while True:
-            print(get_report())
+            print(get_report(args.pair_log))
             print()
             time.sleep(args.interval)
     except KeyboardInterrupt:

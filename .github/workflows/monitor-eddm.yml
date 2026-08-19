@@ -5,6 +5,14 @@ on:
     - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
+permissions:
+  contents: write
+
+# Runs append to the same CSV, so let them queue rather than overlap.
+concurrency:
+  group: monitor-eddm
+  cancel-in-progress: false
+
 jobs:
   fetch-weather:
     runs-on: ubuntu-latest
@@ -18,4 +26,24 @@ jobs:
           python-version: "3.12"
 
       - name: Run Munich Airport (EDDM) weather monitor
-        run: python3 Monitor_eddm.py
+        run: python3 Monitor_eddm.py --pair-log data/metar_dwd_pairs.csv
+
+      - name: Commit new comparison pairs
+        run: |
+          if [ -z "$(git status --porcelain data/metar_dwd_pairs.csv)" ]; then
+            echo "No new pairs to record."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/metar_dwd_pairs.csv
+          git commit -m "Record METAR/DWD temperature pairs"
+          for attempt in 1 2 3 4; do
+            if git pull --rebase origin "$GITHUB_REF_NAME" \
+               && git push origin "HEAD:$GITHUB_REF_NAME"; then
+              exit 0
+            fi
+            sleep $((2 ** attempt))
+          done
+          echo "Could not push the updated pair log after 4 attempts" >&2
+          exit 1
