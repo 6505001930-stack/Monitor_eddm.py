@@ -21,7 +21,7 @@ import statistics
 import sys
 import time
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.error import URLError
 from urllib.request import urlopen
 import json
@@ -180,7 +180,13 @@ def build_pairs(metar_entries, dwd_rows):
         except (TypeError, ValueError):
             continue
         dwd_temp = dwd_by_time[moment]
-        pairs[moment] = (metar_temp, dwd_temp, round(metar_temp - dwd_temp, 2))
+        # How fast the air was warming or cooling at that moment, from DWD's
+        # own series. If TT_10 is a mean over the trailing 10 minutes while
+        # METAR is a spot reading, the difference between them will track
+        # this trend instead of being a fixed sensor offset.
+        previous = dwd_by_time.get(moment - timedelta(minutes=10))
+        trend = round(dwd_temp - previous, 2) if previous is not None else None
+        pairs[moment] = (metar_temp, dwd_temp, round(metar_temp - dwd_temp, 2), trend)
     return pairs
 
 
@@ -191,7 +197,7 @@ def update_pair_log(path: str, pairs: dict):
     often only appears on a later run. Keying by timestamp lets those gaps
     fill themselves in without creating duplicates.
     """
-    fields = ["obs_time_utc", "metar_temp_c", "dwd_tt10_c", "diff_c"]
+    fields = ["obs_time_utc", "metar_temp_c", "dwd_tt10_c", "diff_c", "dwd_trend_c"]
     existing = {}
     if os.path.exists(path):
         with open(path, newline="", encoding="utf-8") as f:
@@ -200,7 +206,7 @@ def update_pair_log(path: str, pairs: dict):
                     existing[row["obs_time_utc"]] = row
 
     added = 0
-    for moment, (metar_temp, dwd_temp, diff) in pairs.items():
+    for moment, (metar_temp, dwd_temp, diff, trend) in pairs.items():
         key = moment.strftime("%Y-%m-%dT%H:%M:%SZ")
         if key not in existing:
             added += 1
@@ -209,13 +215,14 @@ def update_pair_log(path: str, pairs: dict):
             "metar_temp_c": metar_temp,
             "dwd_tt10_c": dwd_temp,
             "diff_c": diff,
+            "dwd_trend_c": "" if trend is None else trend,
         }
 
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
+        writer = csv.DictWriter(f, fieldnames=fields, restval="")
         writer.writeheader()
         for key in sorted(existing):
             writer.writerow(existing[key])
@@ -224,12 +231,21 @@ def update_pair_log(path: str, pairs: dict):
 
 
 def format_pair_summary(path: str, added: int, existing: dict) -> str:
-    diffs = []
+    diffs, rising, falling = [], [], []
     for row in existing.values():
         try:
-            diffs.append(float(row["diff_c"]))
+            diff = float(row["diff_c"])
         except (KeyError, TypeError, ValueError):
             continue
+        diffs.append(diff)
+        try:
+            trend = float(row.get("dwd_trend_c") or "")
+        except ValueError:
+            continue
+        if trend > 0.1:
+            rising.append(diff)
+        elif trend < -0.1:
+            falling.append(diff)
 
     lines = [
         "METAR vs DWD same-time comparison",
@@ -240,18 +256,34 @@ def format_pair_summary(path: str, added: int, existing: dict) -> str:
         return "\n".join(lines)
 
     mean = statistics.fmean(diffs)
-    agree = sum(1 for d in diffs if abs(d) <= 0.5)
     lines.append(f"  Mean diff: {mean:+.2f} C (METAR minus DWD)")
     if len(diffs) > 1:
         lines.append(f"  Spread   : sd {statistics.stdev(diffs):.2f} C, "
                      f"range {min(diffs):+.1f} to {max(diffs):+.1f} C")
-    lines.append(f"  Within METAR's +/-0.5 C rounding: {agree}/{len(diffs)}")
+    lines.append(f"  Sign     : {sum(1 for d in diffs if d > 0)} positive, "
+                 f"{sum(1 for d in diffs if d == 0)} zero, "
+                 f"{sum(1 for d in diffs if d < 0)} negative")
+
+    # A trailing-window mean compared against a spot reading looks warm while
+    # the air warms and cool while it cools, so the sign flip separates that
+    # artefact from a genuine sensor offset. A fixed offset does not flip.
+    if rising:
+        lines.append(f"  While warming ({len(rising)} pairs): mean {statistics.fmean(rising):+.2f} C")
+    if falling:
+        lines.append(f"  While cooling ({len(falling)} pairs): mean {statistics.fmean(falling):+.2f} C")
+
     if len(diffs) < 20:
         lines.append("  Too few pairs to conclude anything yet.")
+    elif not falling:
+        lines.append("  No cooling-phase pairs yet — cannot yet separate a sensor offset")
+        lines.append("  from an averaging artefact. Wait for the evening temperature fall.")
+    elif statistics.fmean(rising or [0]) > 0 > statistics.fmean(falling):
+        lines.append("  Bias flips sign with the trend — consistent with DWD averaging over")
+        lines.append("  10 minutes while METAR reports a spot value, not a sensor difference.")
     elif abs(mean) < 0.3:
-        lines.append("  Mean near zero — consistent with one sensor (or co-located sensors).")
+        lines.append("  Mean near zero in both phases — consistent with one sensor.")
     else:
-        lines.append("  Persistent offset — points to separate sensors, not just sampling noise.")
+        lines.append("  Offset holds in both warming and cooling — points to separate sensors.")
     return "\n".join(lines)
 
 
