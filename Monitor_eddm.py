@@ -23,12 +23,13 @@ METAR_URL = f"https://aviationweather.gov/api/data/metar?ids={ICAO}&format=json"
 TAF_URL = f"https://aviationweather.gov/api/data/taf?ids={ICAO}&format=json"
 REQUEST_TIMEOUT = 10
 
-DWD_BASE_URL = (
+DWD_AIR_TEMP_URL = (
     "https://opendata.dwd.de/climate_environment/CDC/observations_germany/"
-    "climate/10_minutes/air_temperature/now"
+    "climate/10_minutes/air_temperature"
 )
-DWD_STATION_LIST_URL = f"{DWD_BASE_URL}/zehn_now_tu_akt.txt"
-DWD_ZIP_URL_TEMPLATE = DWD_BASE_URL + "/10minutenwerte_TU_{station_id:05d}_now.zip"
+# The station description file lives under recent/, not now/.
+DWD_STATION_LIST_URL = f"{DWD_AIR_TEMP_URL}/recent/zehn_min_tu_Beschreibung_Stationen.txt"
+DWD_ZIP_URL_TEMPLATE = DWD_AIR_TEMP_URL + "/now/10minutenwerte_TU_{station_id:05d}_now.zip"
 # München-Flughafen, used only if the station list lookup below fails.
 DWD_FALLBACK_STATION_ID = 1262
 DWD_MISSING_VALUE = "-999"
