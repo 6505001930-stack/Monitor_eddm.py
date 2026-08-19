@@ -17,5 +17,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Debug DWD directory listing (temporary)
+        run: |
+          echo "--- index of now/ (grep muenchen) ---"
+          curl -sL "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/" | grep -i -o 'href="[^"]*"' | grep -i -E 'muenchen|münchen' || echo "no match in index"
+          echo "--- station list file candidates ---"
+          curl -sL "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/zehn_now_tu_akt.txt" | head -c 300
+          echo
+          echo "--- meta_data dir listing (grep muenchen) ---"
+          curl -sL "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/meta_data/" | grep -i -o 'href="[^"]*"' | grep -i -E 'muenchen|münchen' || echo "no match in meta_data"
+
       - name: Run Munich Airport (EDDM) weather monitor
         run: python3 Monitor_eddm.py
