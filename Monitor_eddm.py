@@ -34,6 +34,11 @@ DWD_ZIP_URL_TEMPLATE = DWD_AIR_TEMP_URL + "/now/10minutenwerte_TU_{station_id:05
 DWD_FALLBACK_STATION_ID = 1262
 DWD_MISSING_VALUE = "-999"
 
+OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+MUNICH_LAT = 48.3538  # EDDM
+MUNICH_LON = 11.7861
+OPEN_METEO_MODELS = ["icon_seamless", "gfs_seamless", "ecmwf_ifs025", "ukmo_seamless"]
+
 
 def fetch_json(url: str):
     with urlopen(url, timeout=REQUEST_TIMEOUT) as response:
@@ -91,6 +96,47 @@ def format_dwd(station_id: int, row: dict) -> str:
         f"  Humidity  : {row.get('RF_10', 'N/A')} %",
         f"  Pressure  : {row.get('PP_10', 'N/A')} hPa",
     ]
+    return "\n".join(lines)
+
+
+def fetch_model_forecasts():
+    models_param = ",".join(OPEN_METEO_MODELS)
+    url = (
+        f"{OPEN_METEO_URL}?latitude={MUNICH_LAT}&longitude={MUNICH_LON}"
+        f"&hourly=temperature_2m&models={models_param}"
+        f"&timezone=UTC&forecast_days=2"
+    )
+    data = fetch_json(url)
+    hourly = data.get("hourly")
+    if not hourly or not hourly.get("time"):
+        raise ValueError("no hourly data in Open-Meteo response")
+
+    times = hourly["time"]
+    now_hour = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:00")
+    idx = times.index(now_hour) if now_hour in times else 0
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    results = []
+    for model in OPEN_METEO_MODELS:
+        series = hourly.get(f"temperature_2m_{model}")
+        if not series:
+            continue
+        current = series[idx] if idx < len(series) else None
+        today_values = [v for t, v in zip(times, series) if t.startswith(today) and v is not None]
+        today_max = max(today_values) if today_values else None
+        results.append((model, current, today_max))
+
+    if not results:
+        raise ValueError("none of the requested models returned data")
+    return results
+
+
+def format_model_forecasts(results) -> str:
+    lines = ["Open-Meteo model comparison — 2m temperature (Munich)"]
+    for model, current, today_max in results:
+        cur_str = f"{current} C" if current is not None else "N/A"
+        max_str = f"{today_max} C" if today_max is not None else "N/A"
+        lines.append(f"  {model:<16}: now {cur_str:>7}   today max {max_str:>7}")
     return "\n".join(lines)
 
 
@@ -158,6 +204,14 @@ def get_report() -> str:
         parts.append(format_dwd(station_id, row))
     except (URLError, ValueError, TimeoutError, zipfile.BadZipFile, StopIteration) as exc:
         parts.append(f"DWD: failed to fetch ({exc})")
+
+    parts.append("")
+
+    try:
+        model_results = fetch_model_forecasts()
+        parts.append(format_model_forecasts(model_results))
+    except (URLError, ValueError, TimeoutError) as exc:
+        parts.append(f"Open-Meteo models: failed to fetch ({exc})")
 
     return "\n".join(parts)
 
