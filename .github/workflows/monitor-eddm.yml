@@ -19,13 +19,25 @@ jobs:
 
       - name: Debug DWD directory listing (temporary)
         run: |
-          echo "--- index of now/ (grep muenchen) ---"
-          curl -sL "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/" | grep -i -o 'href="[^"]*"' | grep -i -E 'muenchen|münchen' || echo "no match in index"
-          echo "--- station list file candidates ---"
-          curl -sL "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/zehn_now_tu_akt.txt" | head -c 300
+          echo "--- status codes ---"
+          for u in \
+            "https://opendata.dwd.de/" \
+            "https://opendata.dwd.de/climate_environment/" \
+            "https://opendata.dwd.de/climate_environment/CDC/" \
+            "https://opendata.dwd.de/climate_environment/CDC/observations_germany/" \
+            "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/" \
+            "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/" \
+            "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/" \
+            "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/" \
+            ; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$u")
+            echo "$code  $u"
+          done
+          echo "--- first 2000 chars of 10_minutes/air_temperature/ ---"
+          curl -sL "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/" | head -c 2000
           echo
-          echo "--- meta_data dir listing (grep muenchen) ---"
-          curl -sL "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/meta_data/" | grep -i -o 'href="[^"]*"' | grep -i -E 'muenchen|münchen' || echo "no match in meta_data"
+          echo "--- first 3000 chars of .../now/ ---"
+          curl -sL "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/" | head -c 3000
 
       - name: Run Munich Airport (EDDM) weather monitor
         run: python3 Monitor_eddm.py
