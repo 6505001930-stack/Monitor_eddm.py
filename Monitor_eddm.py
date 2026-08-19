@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Weather monitor for Munich Airport (ICAO: EDDM).
 
-Fetches current METAR and TAF reports from the NOAA Aviation Weather
-Center API, plus raw 10-minute station observations from the German
-weather service (DWD), and prints a human-readable summary. Can run
-once or loop at a fixed interval to keep monitoring conditions.
+The headline temperature comes from METAR, which is the freshest actual
+measurement available for the airport: it is issued every 30 minutes and
+reaches the API within a few minutes. The DWD open-data feeds are also
+real measurements but are archive products published 40-50 minutes
+behind wall clock, so they are reported as supporting detail rather than
+as the current temperature. Every reading is printed with its age so a
+stale figure is never mistaken for a live one.
+
+Also fetches TAF (aerodrome forecast) and compares 2m temperature across
+four forecast models via Open-Meteo.
 """
 
 import argparse
@@ -43,6 +49,42 @@ OPEN_METEO_MODELS = ["icon_seamless", "gfs_seamless", "ecmwf_ifs025", "ukmo_seam
 def fetch_json(url: str):
     with urlopen(url, timeout=REQUEST_TIMEOUT) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def parse_utc(raw) -> datetime | None:
+    """Parse the assorted timestamp shapes these APIs return, as UTC."""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return datetime.fromtimestamp(raw, tz=timezone.utc)
+
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.isdigit() and len(text) == 12:  # DWD MESS_DATUM, e.g. 202608191150
+        return datetime.strptime(text, "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+
+    text = text.replace("Z", "+00:00")
+    if "T" not in text and " " in text:
+        text = text.replace(" ", "T", 1)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def format_stamp(moment: datetime | None) -> str:
+    """Render a timestamp together with how old it is."""
+    if moment is None:
+        return "time unknown"
+    age = (datetime.now(timezone.utc) - moment).total_seconds() / 60
+    when = moment.strftime("%Y-%m-%d %H:%M UTC")
+    if age < 0:
+        return f"{when} (in the future)"
+    return f"{when} ({int(round(age))} min old)"
 
 
 def find_munich_station_id() -> int:
@@ -88,13 +130,14 @@ def fetch_dwd_temperature():
 
 
 def format_dwd(station_id: int, row: dict) -> str:
+    measured = parse_utc(row.get("MESS_DATUM"))
     lines = [
-        f"DWD raw 10-min observation — station {station_id} (Munich)",
-        f"  Timestamp : {row.get('MESS_DATUM', 'N/A')} (DWD MESS_DATUM)",
-        f"  Air temp  : {row.get('TT_10', 'N/A')} C   (TT_10, 2m height, raw)",
-        f"  Dewpoint  : {row.get('TD_10', 'N/A')} C",
-        f"  Humidity  : {row.get('RF_10', 'N/A')} %",
-        f"  Pressure  : {row.get('PP_10', 'N/A')} hPa",
+        f"DWD station observation — station {station_id} (Munich)",
+        f"  Measured : {format_stamp(measured)}",
+        f"  Air temp : {row.get('TT_10', 'N/A')} C   (TT_10, 2m height, raw)",
+        f"  Dewpoint : {row.get('TD_10', 'N/A')} C",
+        f"  Humidity : {row.get('RF_10', 'N/A')} %",
+        f"  Pressure : {row.get('PP_10', 'N/A')} hPa",
     ]
     return "\n".join(lines)
 
@@ -128,26 +171,30 @@ def fetch_model_forecasts():
 
     if not results:
         raise ValueError("none of the requested models returned data")
-    return results
+    return times[idx], results
 
 
-def format_model_forecasts(results) -> str:
-    lines = ["Open-Meteo model comparison — 2m temperature (Munich)"]
+def format_model_forecasts(hour_label: str, results) -> str:
+    lines = [
+        "Open-Meteo model comparison — 2m temperature (Munich)",
+        f"  Forecast values for hour {hour_label} UTC (model output, not a measurement)",
+    ]
     for model, current, today_max in results:
         cur_str = f"{current} C" if current is not None else "N/A"
         max_str = f"{today_max} C" if today_max is not None else "N/A"
-        lines.append(f"  {model:<16}: now {cur_str:>7}   today max {max_str:>7}")
+        lines.append(f"  {model:<16}: this hour {cur_str:>7}   today max {max_str:>7}")
     return "\n".join(lines)
 
 
 def format_metar(entry: dict) -> str:
+    observed = parse_utc(entry.get("obsTime") or entry.get("reportTime"))
     lines = [
-        f"METAR {entry.get('icaoId', ICAO)} @ {entry.get('reportTime', 'N/A')} UTC",
-        f"  Raw     : {entry.get('rawOb', 'N/A')}",
-        f"  Temp    : {entry.get('temp', 'N/A')} C   Dewpoint: {entry.get('dewp', 'N/A')} C",
-        f"  Wind    : {entry.get('wdir', 'N/A')} deg @ {entry.get('wspd', 'N/A')} kt"
+        f"METAR {entry.get('icaoId', ICAO)} — observed {format_stamp(observed)}",
+        f"  Raw      : {entry.get('rawOb', 'N/A')}",
+        f"  Temp     : {entry.get('temp', 'N/A')} C   Dewpoint: {entry.get('dewp', 'N/A')} C",
+        f"  Wind     : {entry.get('wdir', 'N/A')} deg @ {entry.get('wspd', 'N/A')} kt"
         + (f" gust {entry.get('wgst')}" if entry.get("wgst") else ""),
-        f"  Visib   : {entry.get('visib', 'N/A')} SM",
+        f"  Visib    : {entry.get('visib', 'N/A')} SM",
         f"  Altimeter: {entry.get('altim', 'N/A')} hPa",
     ]
     clouds = entry.get("clouds") or []
@@ -155,36 +202,82 @@ def format_metar(entry: dict) -> str:
         cloud_str = ", ".join(
             f"{c.get('cover', '?')} {c.get('base', '?')}ft" for c in clouds
         )
-        lines.append(f"  Clouds  : {cloud_str}")
+        lines.append(f"  Clouds   : {cloud_str}")
     return "\n".join(lines)
 
 
 def format_taf(entry: dict) -> str:
+    issued = parse_utc(entry.get("issueTime"))
     lines = [
-        f"TAF {entry.get('icaoId', ICAO)} issued {entry.get('issueTime', 'N/A')} UTC",
-        f"  Raw     : {entry.get('rawTAF', 'N/A')}",
+        f"TAF {entry.get('icaoId', ICAO)} — issued {format_stamp(issued)}",
+        f"  Raw      : {entry.get('rawTAF', 'N/A')}",
     ]
     for fcst in entry.get("fcsts", []):
-        time_from = fcst.get("timeFrom", "?")
-        time_to = fcst.get("timeTo", "?")
-        wind = f"{fcst.get('wdir', '?')} deg @ {fcst.get('wspd', '?')} kt"
-        visib = fcst.get("visib", "?")
-        lines.append(f"  {time_from} -> {time_to} | wind {wind} | visib {visib} SM")
+        time_from = parse_utc(fcst.get("timeFrom"))
+        time_to = parse_utc(fcst.get("timeTo"))
+        span = "{} -> {}".format(
+            time_from.strftime("%d %H:%MZ") if time_from else "?",
+            time_to.strftime("%d %H:%MZ") if time_to else "?",
+        )
+        wdir, wspd = fcst.get("wdir"), fcst.get("wspd")
+        wind = f"{wdir} deg @ {wspd} kt" if wdir is not None and wspd is not None else "n/a"
+        visib = fcst.get("visib") or "n/a"
+        lines.append(f"  {span} | wind {wind} | visib {visib} SM")
     return "\n".join(lines)
+
+
+def headline(metar_entry, dwd) -> str:
+    """Lead with the freshest real measurement available."""
+    if metar_entry:
+        observed = parse_utc(metar_entry.get("obsTime") or metar_entry.get("reportTime"))
+        return (
+            f"CURRENT TEMPERATURE : {metar_entry.get('temp', 'N/A')} C\n"
+            f"  source            : METAR {ICAO} (airport sensor)\n"
+            f"  observed          : {format_stamp(observed)}"
+        )
+    if dwd:
+        station_id, row = dwd
+        measured = parse_utc(row.get("MESS_DATUM"))
+        return (
+            f"CURRENT TEMPERATURE : {row.get('TT_10', 'N/A')} C\n"
+            f"  source            : DWD station {station_id} (METAR unavailable — fallback)\n"
+            f"  measured          : {format_stamp(measured)}"
+        )
+    return "CURRENT TEMPERATURE : unavailable (no measurement source reachable)"
 
 
 def get_report() -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    parts = [f"=== Munich Airport ({ICAO}) Weather Report — {now} UTC ==="]
 
+    metar_entry = None
+    metar_error = None
     try:
         metar_data = fetch_json(METAR_URL)
         if metar_data:
-            parts.append(format_metar(metar_data[0]))
+            metar_entry = metar_data[0]
         else:
-            parts.append("METAR: no data available")
-    except (URLError, ValueError, TimeoutError) as exc:
-        parts.append(f"METAR: failed to fetch ({exc})")
+            metar_error = "no data available"
+    except (URLError, ValueError, TimeoutError, OSError) as exc:
+        metar_error = f"failed to fetch ({exc})"
+
+    dwd = None
+    dwd_error = None
+    try:
+        dwd = fetch_dwd_temperature()
+    except (URLError, ValueError, TimeoutError, OSError, zipfile.BadZipFile, StopIteration) as exc:
+        dwd_error = f"failed to fetch ({exc})"
+
+    parts = [
+        f"=== Munich Airport ({ICAO}) Weather Report — {now} UTC ===",
+        "",
+        headline(metar_entry, dwd),
+        "",
+    ]
+
+    if metar_entry:
+        parts.append(format_metar(metar_entry))
+    else:
+        parts.append(f"METAR: {metar_error}")
 
     parts.append("")
 
@@ -194,23 +287,22 @@ def get_report() -> str:
             parts.append(format_taf(taf_data[0]))
         else:
             parts.append("TAF: no data available")
-    except (URLError, ValueError, TimeoutError) as exc:
+    except (URLError, ValueError, TimeoutError, OSError) as exc:
         parts.append(f"TAF: failed to fetch ({exc})")
 
     parts.append("")
 
-    try:
-        station_id, row = fetch_dwd_temperature()
-        parts.append(format_dwd(station_id, row))
-    except (URLError, ValueError, TimeoutError, zipfile.BadZipFile, StopIteration) as exc:
-        parts.append(f"DWD: failed to fetch ({exc})")
+    if dwd:
+        parts.append(format_dwd(*dwd))
+    else:
+        parts.append(f"DWD: {dwd_error}")
 
     parts.append("")
 
     try:
-        model_results = fetch_model_forecasts()
-        parts.append(format_model_forecasts(model_results))
-    except (URLError, ValueError, TimeoutError) as exc:
+        hour_label, model_results = fetch_model_forecasts()
+        parts.append(format_model_forecasts(hour_label, model_results))
+    except (URLError, ValueError, TimeoutError, OSError) as exc:
         parts.append(f"Open-Meteo models: failed to fetch ({exc})")
 
     return "\n".join(parts)
@@ -218,7 +310,7 @@ def get_report() -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Monitor Munich Airport (EDDM) weather via METAR/TAF and DWD raw 10-min data."
+        description="Monitor Munich Airport (EDDM) weather via METAR/TAF, DWD observations and model forecasts."
     )
     parser.add_argument(
         "--interval",
