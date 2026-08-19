@@ -287,6 +287,35 @@ def format_pair_summary(path: str, added: int, existing: dict) -> str:
     return "\n".join(lines)
 
 
+def fetch_open_meteo_current():
+    """Open-Meteo's blended nowcast: refreshes roughly every 15 minutes, but
+    it is model output smoothed against observations, not a sensor reading.
+    Measured once against METAR: it read 25.8 C while METAR read 28.0 C for
+    the same moment, a 2.2 C gap — faster than any measurement source here,
+    at the cost of accuracy that a real sensor doesn't have.
+    """
+    url = (
+        f"{OPEN_METEO_URL}?latitude={MUNICH_LAT}&longitude={MUNICH_LON}"
+        f"&current=temperature_2m&timezone=UTC"
+    )
+    data = fetch_json(url)
+    current = data.get("current")
+    if not current or current.get("temperature_2m") is None:
+        raise ValueError("no current temperature in Open-Meteo response")
+    return current["time"], current["temperature_2m"]
+
+
+def format_open_meteo_current(time_label: str, temp) -> str:
+    moment = parse_utc(time_label)
+    lines = [
+        "Open-Meteo nowcast — 2m temperature (fastest update, least accurate)",
+        f"  Blended  : {format_stamp(moment)}",
+        f"  Temp     : {temp} C   (model blend, not a sensor — "
+        f"off by 2.2 C vs METAR when last checked)",
+    ]
+    return "\n".join(lines)
+
+
 def fetch_model_forecasts():
     models_param = ",".join(OPEN_METEO_MODELS)
     url = (
@@ -448,6 +477,14 @@ def get_report(pair_log: str | None = None) -> str:
         parts.append(format_dwd(*dwd))
     else:
         parts.append(f"DWD: {dwd_error}")
+
+    parts.append("")
+
+    try:
+        nowcast_time, nowcast_temp = fetch_open_meteo_current()
+        parts.append(format_open_meteo_current(nowcast_time, nowcast_temp))
+    except (URLError, ValueError, TimeoutError, OSError) as exc:
+        parts.append(f"Open-Meteo nowcast: failed to fetch ({exc})")
 
     parts.append("")
 
