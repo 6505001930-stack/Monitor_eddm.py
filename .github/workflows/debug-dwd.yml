@@ -7,17 +7,31 @@ jobs:
   debug:
     runs-on: ubuntu-latest
     steps:
-      - name: Inspect DWD station 01262 file
+      - name: Compare freshness of candidate realtime sources
         run: |
-          BASE="https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now"
           echo "=== now UTC ==="
           date -u
-          echo "=== directory entry for station 01262 ==="
-          curl -sL "$BASE/" | grep -o '10minutenwerte_TU_01262_now.zip[^<]*' | head -2
-          echo "=== HTTP headers for the zip ==="
-          curl -sI "$BASE/10minutenwerte_TU_01262_now.zip" | grep -i -E 'last-modified|content-length|etag'
-          echo "=== full contents of the product file ==="
-          curl -sL -o /tmp/s.zip "$BASE/10minutenwerte_TU_01262_now.zip"
-          unzip -o -q /tmp/s.zip -d /tmp/sx
-          ls -la /tmp/sx
-          cat /tmp/sx/produkt_zehn_now_tu_*.txt
+
+          echo
+          echo "=== [A] DWD POI current observations: find Munich station ==="
+          curl -sL "https://opendata.dwd.de/weather/weather_reports/poi/" \
+            | grep -o 'href="[^"]*"' | grep -E '108[0-9]{2}|10865|10870' | head -20 || echo "no 108xx match"
+
+          echo
+          echo "=== [A2] POI 10870 (Muenchen-Flughafen?) last-modified + tail ==="
+          curl -sI "https://opendata.dwd.de/weather/weather_reports/poi/10870_-BEOB.csv" \
+            | grep -i -E 'HTTP/|last-modified|content-length'
+          curl -sL "https://opendata.dwd.de/weather/weather_reports/poi/10870_-BEOB.csv" \
+            | head -3
+          echo "--- tail ---"
+          curl -sL "https://opendata.dwd.de/weather/weather_reports/poi/10870_-BEOB.csv" \
+            | tail -3
+
+          echo
+          echo "=== [B] Open-Meteo current temperature_2m ==="
+          curl -sL "https://api.open-meteo.com/v1/forecast?latitude=48.3538&longitude=11.7861&current=temperature_2m&timezone=UTC"
+
+          echo
+          echo
+          echo "=== [C] METAR history (last 3h) — observation cadence ==="
+          curl -sL "https://aviationweather.gov/api/data/metar?ids=EDDM&format=raw&hours=3"
