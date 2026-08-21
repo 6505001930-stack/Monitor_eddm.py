@@ -3,3 +3,4 @@ __pycache__/
 rjtt_monitor.log
 rjtt_pairs.csv
 .taf_last_seen.json
+.monitor.pid
