@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+rjtt_monitor.log
+rjtt_pairs.csv
