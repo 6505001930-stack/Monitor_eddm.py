@@ -39,6 +39,12 @@ JMA_POINT_URL_TEMPLATE = (
 )
 # JMA quality flag: 0 means a normal, confirmed value.
 JMA_OK_FLAG = 0
+# AMeDAS windDirection is a 16-point compass code, 0 = calm, else clockwise from N in 22.5° steps.
+JMA_WIND_COMPASS = [
+    "Calm", "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+    "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW",
+]
+MPS_TO_KT = 1.94384
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 HANEDA_LAT = 35.553  # RJTT
@@ -120,7 +126,14 @@ def fetch_jma_rows(hours: int = 6):
             temp = entry.get("temp")
             if not temp or temp[1] != JMA_OK_FLAG:
                 continue
-            rows.append({"time_jst": key, "temp": temp[0]})
+            wind_speed = entry.get("wind")
+            wind_dir = entry.get("windDirection")
+            rows.append({
+                "time_jst": key,
+                "temp": temp[0],
+                "wind_speed": wind_speed[0] if wind_speed and wind_speed[1] == JMA_OK_FLAG else None,
+                "wind_dir_code": wind_dir[0] if wind_dir and wind_dir[1] == JMA_OK_FLAG else None,
+            })
 
     if not rows:
         raise ValueError("no valid AMeDAS temperature readings for Haneda")
@@ -135,6 +148,17 @@ def format_jma(row: dict) -> str:
         f"  Measured : {format_stamp(measured)}",
         f"  Air temp : {row['temp']} C   (2m height, raw)",
     ]
+    wind_speed = row.get("wind_speed")
+    wind_dir_code = row.get("wind_dir_code")
+    if wind_speed is not None:
+        compass = (
+            JMA_WIND_COMPASS[wind_dir_code]
+            if wind_dir_code is not None and 0 <= wind_dir_code < len(JMA_WIND_COMPASS)
+            else "N/A"
+        )
+        lines.append(
+            f"  Wind     : {compass} @ {wind_speed} m/s ({wind_speed * MPS_TO_KT:.1f} kt)"
+        )
     return "\n".join(lines)
 
 
