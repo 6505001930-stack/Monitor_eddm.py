@@ -28,17 +28,36 @@ running() {
 
 if running; then
     pid="$(cat "$PIDFILE")"
-    # Report how stale the log is, so a wedged-but-alive process is visible.
-    if [[ -f "$LOG" ]]; then
-        age=$(( ($(date +%s) - $(stat -c %Y "$LOG")) / 60 ))
-        echo "monitor ALIVE (pid $pid, log ${age} min old)"
-        if (( age > 25 )); then
-            echo "  WARNING: log is stale for a ${INTERVAL}s interval — process may be wedged"
-        fi
-    else
+    if [[ ! -f "$LOG" ]]; then
         echo "monitor ALIVE (pid $pid, no log yet)"
+        exit 0
     fi
-    exit 0
+
+    # Measure staleness from the log, but never from before we started this
+    # process: a monitor launched seconds ago has not written its first line
+    # yet, and judging it by the old log's mtime would kill it on sight.
+    last_active=$(stat -c %Y "$LOG")
+    started=$(stat -c %Y "$PIDFILE")
+    (( started > last_active )) && last_active=$started
+
+    age=$(( ($(date +%s) - last_active) / 60 ))
+    if (( age <= 25 )); then
+        echo "monitor ALIVE (pid $pid, log ${age} min old)"
+        exit 0
+    fi
+
+    # Alive but not writing: the process is wedged, so a plain "is it running"
+    # check would keep saying ALIVE forever while no data is collected.
+    # Kill this specific pid (never pkill by pattern — that has matched the
+    # calling shell before) and fall through to the restart below.
+    echo "monitor WEDGED (pid $pid, log ${age} min old) — killing and restarting"
+    kill "$pid" 2>/dev/null
+    for _ in 1 2 3 4 5; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+    done
+    kill -9 "$pid" 2>/dev/null
+    rm -f "$PIDFILE"
 fi
 
 cd "$DIR" || exit 1
